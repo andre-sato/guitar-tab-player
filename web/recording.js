@@ -1,54 +1,70 @@
-import SwiftUI
+// Grava o áudio do player (e, se autorizado, o microfone) enquanto você toca junto.
+(function () {
+  "use strict";
 
-/// Hardware-keyboard shortcuts for iPad (spec §UX, §41).
-///
-/// The buttons are invisible but not zero-sized: a fully collapsed button is unreliable as a
-/// shortcut host. They are split into two `Group`s so the view builder never sees more than
-/// ten children in one block.
-struct PlayerKeyboardShortcuts: ViewModifier {
-    @Environment(PlaybackEngine.self) private var playback
+  let recorder = null;
+  let chunks = [];
+  let micStream = null;
 
-    func body(content: Content) -> some View {
-        content.background {
-            VStack(spacing: 0) {
-                Group {
-                    Button("Play or pause") { playback.togglePlayPause() }
-                        .keyboardShortcut(.space, modifiers: [])
-                    Button("Previous measure") { playback.skip(measures: -1) }
-                        .keyboardShortcut(.leftArrow, modifiers: [])
-                    Button("Next measure") { playback.skip(measures: 1) }
-                        .keyboardShortcut(.rightArrow, modifiers: [])
-                    Button("Back to start") { playback.seek(toBeat: 0) }
-                        .keyboardShortcut(.home, modifiers: [])
-                    Button("Toggle metronome") { playback.setMetronome(enabled: !playback.state.metronomeEnabled) }
-                        .keyboardShortcut("m", modifiers: [])
-                    Button("Toggle count-in") { playback.setCountIn(enabled: !playback.state.countInEnabled) }
-                        .keyboardShortcut("c", modifiers: [])
-                }
-                Group {
-                    Button("Toggle backtrack") { playback.setBacktrack(enabled: !playback.state.backtrackEnabled) }
-                        .keyboardShortcut("b", modifiers: [])
-                    Button("Toggle loop") { playback.setLoopEnabled(!playback.state.loopEnabled) }
-                        .keyboardShortcut("l", modifiers: [])
-                    Button("Toggle auto-scroll") { playback.setAutoScroll(enabled: !playback.state.autoScrollEnabled) }
-                        .keyboardShortcut("a", modifiers: [])
-                    Button("Slower") { playback.setSpeed(playback.state.speed - 0.05) }
-                        .keyboardShortcut("[", modifiers: [])
-                    Button("Faster") { playback.setSpeed(playback.state.speed + 0.05) }
-                        .keyboardShortcut("]", modifiers: [])
-                    Button("Transpose down") { playback.setTranspose(playback.state.transpose - 1) }
-                        .keyboardShortcut(.downArrow, modifiers: [])
-                    Button("Transpose up") { playback.setTranspose(playback.state.transpose + 1) }
-                        .keyboardShortcut(.upArrow, modifiers: [])
-                }
-            }
-            .frame(width: 1, height: 1)
-            .opacity(0.001)
-            .accessibilityHidden(true)
-        }
+  async function startRecording() {
+    const playerDest = window.__playerRecordingDestination;
+    if (!playerDest) return;
+
+    const combined = new MediaStream();
+    playerDest.stream.getAudioTracks().forEach((t) => combined.addTrack(t));
+
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream.getAudioTracks().forEach((t) => combined.addTrack(t));
+    } catch (err) {
+      console.warn("Microfone não autorizado, gravando só o áudio do player.", err);
+      micStream = null;
     }
-}
 
-extension View {
-    func playerKeyboardShortcuts() -> some View { modifier(PlayerKeyboardShortcuts()) }
-}
+    const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]
+      .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+
+    chunks = [];
+    recorder = mimeType ? new MediaRecorder(combined, { mimeType }) : new MediaRecorder(combined);
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const url = URL.createObjectURL(blob);
+      const song = window.__player ? window.__player.getState().song : null;
+      const name = (song ? song.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase() : "gravacao") + ".webm";
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.textContent = `Baixar gravação (${name})`;
+      a.style.cssText = "display:block;margin-top:10px;color:var(--accent,#5cc8ff);";
+      const card = document.getElementById("btn-record").closest(".card");
+      const old = card.querySelector(".recording-download");
+      if (old) old.remove();
+      a.className = "recording-download";
+      card.appendChild(a);
+
+      if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    };
+    recorder.start();
+  }
+
+  function stopRecording() {
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    recorder = null;
+  }
+
+  document.getElementById("btn-record").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const isRecording = btn.classList.contains("recording");
+    if (isRecording) {
+      stopRecording();
+      btn.classList.remove("recording");
+      btn.textContent = "⏺ Gravar";
+    } else {
+      await startRecording();
+      btn.classList.add("recording");
+      btn.textContent = "⏹ Gravando…";
+    }
+  });
+})();

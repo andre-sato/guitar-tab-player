@@ -1,211 +1,228 @@
-import SwiftUI
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Guitar Tab Player — Web</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161c;
+    --panel: #1c1f27;
+    --panel-2: #232732;
+    --border: #2c303c;
+    --text: #e8eaf0;
+    --muted: #9096a6;
+    --accent: #5cc8ff;
+    --accent-2: #ff7a5c;
+    --good: #5cff9d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .tag { color: var(--muted); font-size: 12px; }
 
-/// Transport, scrubber, speed and key (spec §28 "Playback" area).
-struct PlaybackControlsView: View {
-    @Environment(PlaybackEngine.self) private var playback
+  main {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: calc(100vh - 49px);
+  }
+  #song-list {
+    border-right: 1px solid var(--border);
+    padding: 10px;
+    overflow-y: auto;
+  }
+  #song-list h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 6px 8px; }
+  .song-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--text);
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .song-item:hover { background: var(--panel-2); }
+  .song-item.active { background: var(--panel-2); border-color: var(--accent); }
+  .song-item small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
 
-    private var state: PlaybackState { playback.state }
+  #player { padding: 16px; overflow-y: auto; }
+  #empty-state { color: var(--muted); padding: 40px; text-align: center; }
 
-    static let speedPresets: [Double] = [0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 
-    var body: some View {
-        VStack(spacing: 12) {
-            scrubber
-            transport
-            HStack(spacing: 12) {
-                speedControl
-                Divider().frame(height: 34)
-                keyControl
-            }
-            quickToggles
-        }
-    }
+  #song-title { font-size: 20px; font-weight: 700; margin: 0; }
+  #song-meta { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
 
-    // MARK: - Scrubber
+  .transport-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  button.transport {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.transport:hover { border-color: var(--accent); }
+  button.transport.primary { background: var(--accent); color: #08202b; border-color: var(--accent); font-weight: 600; }
+  button.transport.recording { background: var(--accent-2); color: #2b0d06; border-color: var(--accent-2); }
 
-    /// Kept out of the string interpolation below: nesting a ternary, a generic `max` and an
-    /// `Int(_:)` conversion inside one interpolated expression is a classic type-checker stall.
-    private var measureNumber: Int {
-        guard state.totalBeats > 0 else { return 1 }
-        let bar = max(1.0, playback.layout.timeSignature.barLengthInBeats)
-        return Int(state.currentBeat / bar) + 1
-    }
+  #scrubber { flex: 1 1 220px; accent-color: var(--accent); }
+  #time-label { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; text-align: right; }
 
-    private var scrubber: some View {
-        VStack(spacing: 2) {
-            Slider(value: Binding(
-                get: { state.currentBeat },
-                set: { playback.seek(toBeat: $0) }
-            ), in: 0...max(1, state.totalBeats))
-            .accessibilityLabel("Position")
-            .accessibilityValue(state.currentTime.clockString)
+  .field { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  select, .field input[type=number] {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
 
-            HStack {
-                Text(state.currentTime.clockString)
-                Spacer()
-                Text("Measure \(measureNumber)")
-                Spacer()
-                Text(state.totalTime.clockString)
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
-        }
-    }
+  #mixer { display: flex; flex-direction: column; gap: 8px; }
+  .track-row {
+    display: grid;
+    grid-template-columns: 20px 1fr auto auto 90px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 8px;
+  }
+  .track-row.selected { background: var(--panel-2); }
+  .track-row .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .track-row .name { cursor: pointer; }
+  .track-row .name small { display: block; color: var(--muted); font-size: 10.5px; }
+  .mini-btn {
+    width: 26px; height: 26px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .mini-btn.on-mute { background: var(--accent-2); color: #2b0d06; border-color: var(--accent-2); }
+  .mini-btn.on-solo { background: var(--accent); color: #08202b; border-color: var(--accent); }
+  .track-row input[type=range] { width: 100%; accent-color: var(--accent); }
 
-    // MARK: - Transport
+  #tab-view-wrap { overflow-x: auto; border-radius: 8px; background: #0e1015; border: 1px solid var(--border); }
+  #tab-canvas { display: block; cursor: pointer; }
+  #tab-track-tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab-tab-btn {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .tab-tab-btn.active { color: var(--text); border-color: var(--accent); }
 
-    private var transport: some View {
-        HStack(spacing: 26) {
-            Button { playback.skip(measures: -1) } label: {
-                Image(systemName: "backward.fill").font(.title2)
-            }
-            .accessibilityLabel("Previous measure")
+  footer { color: var(--muted); font-size: 11px; padding: 10px 16px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
 
-            Button { playback.stop() } label: {
-                Image(systemName: "stop.fill").font(.title3)
-            }
-            .accessibilityLabel("Stop")
+<header>
+  <h1>🎸 Guitar Tab Player</h1>
+  <span class="tag">versão web (não-oficial, gerada localmente)</span>
+</header>
 
-            ZStack {
-                Button { playback.togglePlayPause() } label: {
-                    Image(systemName: state.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 54))
-                        .symbolRenderingMode(.hierarchical)
-                }
-                .accessibilityLabel(state.isPlaying ? "Pause" : "Play")
+<main>
+  <div id="song-list">
+    <h2>Biblioteca</h2>
+    <div id="song-list-items"></div>
+  </div>
 
-                if state.isCountingIn {
-                    Text(MetronomeEngine.countInDisplayNumber(beatsRemaining: state.countInBeatsRemaining))
-                        .font(.system(size: 30, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(14)
-                        .background(Circle().fill(Color.accentColor))
-                        .transition(.scale.combined(with: .opacity))
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-            }
-            .animation(.easeOut(duration: 0.12), value: state.countInBeatsRemaining)
+  <div id="player">
+    <div id="empty-state">Escolha uma música à esquerda para começar.</div>
+    <div id="player-content" hidden>
 
-            Button { playback.setLoopEnabled(!state.loopEnabled) } label: {
-                Image(systemName: state.loopEnabled ? "repeat.circle.fill" : "repeat")
-                    .font(.title3)
-                    .foregroundStyle(state.loopEnabled ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-            }
-            .accessibilityLabel("Loop")
-            .accessibilityValue(state.loopEnabled ? "on" : "off")
+      <div class="card">
+        <p id="song-title"></p>
+        <p id="song-meta"></p>
 
-            Button { playback.skip(measures: 1) } label: {
-                Image(systemName: "forward.fill").font(.title2)
-            }
-            .accessibilityLabel("Next measure")
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.tint)
-    }
+        <div class="transport-row" style="margin-top:12px;">
+          <button class="transport primary" id="btn-play">▶ Tocar</button>
+          <button class="transport" id="btn-stop">⏹ Parar</button>
+          <input type="range" id="scrubber" min="0" max="1000" value="0" />
+          <span id="time-label">0:00 / 0:00</span>
+        </div>
 
-    // MARK: - Speed
+        <div class="transport-row" style="margin-top:10px;">
+          <label class="field">Velocidade
+            <select id="speed-select">
+              <option value="0.5">50%</option>
+              <option value="0.75">75%</option>
+              <option value="0.9">90%</option>
+              <option value="1" selected>100%</option>
+              <option value="1.1">110%</option>
+              <option value="1.25">125%</option>
+            </select>
+          </label>
+          <label class="field">Tom
+            <button class="transport" id="btn-transpose-down">−</button>
+            <span id="transpose-label" style="min-width:2.5em; text-align:center;">0</span>
+            <button class="transport" id="btn-transpose-up">+</button>
+          </label>
+          <label class="field"><input type="checkbox" id="chk-metronome" /> Metrônomo</label>
+          <label class="field"><input type="checkbox" id="chk-countin" checked /> Count-in</label>
+          <button class="transport" id="btn-record">⏺ Gravar</button>
+        </div>
+      </div>
 
-    private var speedControl: some View {
-        VStack(spacing: 2) {
-            Text("Speed").font(.caption2).foregroundStyle(.secondary)
-            Menu {
-                ForEach(Self.speedPresets, id: \.self) { value in
-                    Button {
-                        playback.setSpeed(value)
-                    } label: {
-                        if abs(value - state.speed) < 0.001 {
-                            Label("\(Int(value * 100))%", systemImage: "checkmark")
-                        } else {
-                            Text("\(Int(value * 100))%")
-                        }
-                    }
-                }
-            } label: {
-                Text("\(Int(state.speed * 100))%")
-                    .font(.headline.monospacedDigit())
-                    .frame(minWidth: 62)
-                    .padding(.vertical, 6)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .accessibilityLabel("Playback speed")
-            .accessibilityValue("\(Int(state.speed * 100)) percent")
-        }
-    }
+      <div class="card">
+        <h3>Mixer</h3>
+        <div id="mixer"></div>
+      </div>
 
-    // MARK: - Key
+      <div class="card">
+        <h3>Tablatura</h3>
+        <div id="tab-track-tabs"></div>
+        <div id="tab-view-wrap">
+          <canvas id="tab-canvas" height="150"></canvas>
+        </div>
+      </div>
 
-    private var keyControl: some View {
-        VStack(spacing: 2) {
-            Text("Key").font(.caption2).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                Button { playback.setTranspose(state.transpose - 1) } label: {
-                    Image(systemName: "minus.circle.fill")
-                }
-                .accessibilityLabel("Transpose down")
+    </div>
+  </div>
+</main>
 
-                VStack(spacing: 0) {
-                    Text(playback.document?.key.displayName ?? "—")
-                        .font(.headline)
-                    if state.transpose != 0 {
-                        Text(state.transpose > 0 ? "+\(state.transpose)" : "\(state.transpose)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(minWidth: 44)
+<footer>
+  Implementação web independente, gerada a partir dos dados de tab do app iOS (<code>GuitarTabPlayer/Resources</code>).
+  Grave com o botão "Gravar" — ele mistura o áudio do player com seu microfone (se autorizado).
+</footer>
 
-                Button { playback.setTranspose(state.transpose + 1) } label: {
-                    Image(systemName: "plus.circle.fill")
-                }
-                .accessibilityLabel("Transpose up")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
-            .font(.title3)
-        }
-        .accessibilityElement(children: .contain)
-    }
-
-    // MARK: - Quick toggles
-
-    private var quickToggles: some View {
-        HStack(spacing: 8) {
-            ToggleChip(title: "Metronome", systemImage: "metronome", isOn: state.metronomeEnabled) {
-                playback.setMetronome(enabled: !state.metronomeEnabled)
-            }
-            ToggleChip(title: "Count-in", systemImage: "3.circle", isOn: state.countInEnabled) {
-                playback.setCountIn(enabled: !state.countInEnabled)
-            }
-            ToggleChip(title: "Backtrack", systemImage: "waveform", isOn: state.backtrackEnabled) {
-                playback.setBacktrack(enabled: !state.backtrackEnabled)
-            }
-        }
-    }
-}
-
-struct ToggleChip: View {
-    let title: String
-    let systemImage: String
-    let isOn: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemImage).imageScale(.small)
-                Text(title).font(.caption.weight(.medium))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity)
-            .background(isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary),
-                        in: Capsule())
-            .foregroundStyle(isOn ? Color.white : Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(isOn ? "on" : "off")
-        .accessibilityAddTraits(.isButton)
-    }
-}
+<script src="songs-data.js"></script>
+<script src="app.js"></script>
+<script src="recording.js"></script>
+</body>
+</html>
