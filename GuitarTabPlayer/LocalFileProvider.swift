@@ -1,101 +1,138 @@
-name: iOS
+import Foundation
 
-# Compiles the app on a macOS runner — the only place an iOS app can be built.
-# `test` proves it compiles and the domain tests pass.
-# `ipa` produces an installable artifact; see INSTALL.md for the signing options.
+/// Reads tabs the app is allowed to ship or that the user imported themselves (spec §2.5).
+///
+/// Two sources are merged:
+///  * `tab-*.json` bundled with the app — original demo material written for this project;
+///  * `Documents/ImportedTabs/*.json` — files the user imported from their own device.
+actor LocalFileProvider: TabProvider {
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+    nonisolated let id = "local"
+    nonisolated let name = "Local Library"
+    nonisolated var isAvailableOffline: Bool { true }
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    private var cache: [String: TabDocument] = [:]
+    private var didLoad = false
 
-env:
-  SCHEME: GuitarTabPlayer
-  PROJECT: GuitarTabPlayer.xcodeproj
+    static var importedTabsDirectory: URL {
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("ImportedTabs", isDirectory: true)
+    }
 
-jobs:
-  test:
-    name: Build & test (simulator)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
+    // MARK: - Loading
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+    private func loadIfNeeded() {
+        guard !didLoad else { return }
+        didLoad = true
 
-      - name: Show toolchain
-        run: xcodebuild -version && swift --version
+        let decoder = JSONDecoder()
+        var urls: [URL] = []
 
-      - name: Build for simulator
-        run: |
-          set -o pipefail
-          xcodebuild build-for-testing \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO
+        if let bundled = Bundle.main.urls(forResourcesWithExtension: "json", subdirectory: nil) {
+            urls += bundled.filter { $0.lastPathComponent.hasPrefix("tab-") }
+        }
+        if let bundledInFolder = Bundle.main.urls(forResourcesWithExtension: "json", subdirectory: "Tabs") {
+            urls += bundledInFolder
+        }
+        if let imported = try? FileManager.default.contentsOfDirectory(
+            at: Self.importedTabsDirectory, includingPropertiesForKeys: nil) {
+            urls += imported.filter { $0.pathExtension.lowercased() == "json" }
+        }
 
-      - name: Run unit tests
-        run: |
-          set -o pipefail
-          xcodebuild test-without-building \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
-            -derivedDataPath build \
-            -resultBundlePath TestResults.xcresult \
-            CODE_SIGNING_ALLOWED=NO
+        for url in urls {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            guard var document = try? decoder.decode(TabDocument.self, from: data) else {
+                NSLog("GuitarTabPlayer: could not decode tab at \(url.lastPathComponent)")
+                continue
+            }
+            document.providerId = id
+            cache[document.id] = document
+        }
+    }
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: TestResults.xcresult
+    private var documents: [TabDocument] {
+        loadIfNeeded()
+        return cache.values.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
 
-  ipa:
-    name: Unsigned .ipa
-    runs-on: macos-15
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
+    // MARK: - TabProvider
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+    func search(query: String, filters: SearchFilters) async throws -> [TabSearchResult] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
-      # Builds a device binary without touching a signing identity. The result is a real .ipa
-      # but it is NOT signed: it cannot be installed as-is. Re-sign it with your own certificate
-      # (see INSTALL.md), or swap this job for one that uses your secrets and `-exportArchive`.
-      - name: Archive without signing
-        run: |
-          set -o pipefail
-          xcodebuild archive \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/GuitarTabPlayer.xcarchive \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+        return documents
+            .filter { document in
+                guard trimmed.isEmpty || Self.matches(document, query: trimmed) else { return false }
+                if let instrument = filters.instrument,
+                   !document.tracks.contains(where: { $0.instrument == instrument }) { return false }
+                if let difficulty = filters.difficulty, document.difficulty != difficulty { return false }
+                if let tuning = filters.tuning,
+                   !document.tracks.contains(where: { $0.tuning.name.caseInsensitiveCompare(tuning) == .orderedSame }) { return false }
+                if let artist = filters.artist,
+                   document.artist.localizedCaseInsensitiveContains(artist) == false { return false }
+                if let album = filters.album,
+                   (document.album ?? "").localizedCaseInsensitiveContains(album) == false { return false }
+                return true
+            }
+            .map(makeResult(from:))
+    }
 
-      - name: Package as .ipa
-        run: |
-          mkdir -p build/Payload
-          cp -R build/GuitarTabPlayer.xcarchive/Products/Applications/GuitarTabPlayer.app build/Payload/
-          (cd build && zip -qry GuitarTabPlayer-unsigned.ipa Payload)
-          ls -lh build/GuitarTabPlayer-unsigned.ipa
+    func fetchTab(id documentId: String) async throws -> TabDocument {
+        loadIfNeeded()
+        guard let document = cache[documentId] else { throw ProviderError.notFound(id: documentId) }
+        return document
+    }
 
-      - name: Upload .ipa
-        uses: actions/upload-artifact@v4
-        with:
-          name: GuitarTabPlayer-unsigned-ipa
-          path: build/GuitarTabPlayer-unsigned.ipa
-          retention-days: 30
+    func fetchAudio(id documentId: String) async throws -> AudioPackage? {
+        loadIfNeeded()
+        return cache[documentId]?.audioPackage
+    }
+
+    func capabilities(for documentId: String) async throws -> ContentCapabilities {
+        loadIfNeeded()
+        return cache[documentId]?.capabilities ?? .tabOnly
+    }
+
+    // MARK: - Import
+
+    /// Copies a user-supplied tab file into the app's library.
+    func importTab(from url: URL) throws -> TabDocument {
+        let needsScope = url.startAccessingSecurityScopedResource()
+        defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+
+        let data = try Data(contentsOf: url)
+        var document = try JSONDecoder().decode(TabDocument.self, from: data)
+        document.providerId = id
+
+        try FileManager.default.createDirectory(at: Self.importedTabsDirectory, withIntermediateDirectories: true)
+        let destination = Self.importedTabsDirectory.appendingPathComponent("\(document.id).json")
+        try JSONEncoder().encode(document).write(to: destination, options: .atomic)
+
+        loadIfNeeded()
+        cache[document.id] = document
+        return document
+    }
+
+    // MARK: - Helpers
+
+    private static func matches(_ document: TabDocument, query: String) -> Bool {
+        document.title.localizedCaseInsensitiveContains(query)
+            || document.artist.localizedCaseInsensitiveContains(query)
+            || (document.album ?? "").localizedCaseInsensitiveContains(query)
+    }
+
+    private func makeResult(from document: TabDocument) -> TabSearchResult {
+        TabSearchResult(id: document.id,
+                        providerId: id,
+                        providerName: name,
+                        title: document.title,
+                        artist: document.artist,
+                        album: document.album,
+                        difficulty: document.difficulty,
+                        tuning: document.tracks.first(where: { $0.instrument.isFretted })?.tuning.name ?? "Standard",
+                        instruments: document.tracks.map(\.instrument),
+                        tempo: document.tempo,
+                        rating: 4.5,
+                        capabilities: document.capabilities)
+    }
+}

@@ -1,58 +1,144 @@
 import Foundation
+import Observation
+import SwiftData
 
-/// Converts between the musical timeline (beats/measures) and wall-clock seconds.
-///
-/// The engine always works in *score time*: seconds at 100% speed. Practice speed is applied
-/// by the audio graph's time-stretch unit, so the beat grid never has to be rebuilt.
-struct TempoEngine: Sendable {
-    var tempo: Double                 // quarter notes per minute
-    var timeSignature: TimeSignature
+/// Composition root: builds the provider registry, the services and the playback engine,
+/// and holds whatever navigation state the whole app shares.
+@Observable
+@MainActor
+final class AppState {
 
-    init(tempo: Double, timeSignature: TimeSignature = .fourFour) {
-        self.tempo = max(1, tempo)
-        self.timeSignature = timeSignature
-    }
-
-    var secondsPerBeat: Double { 60.0 / tempo }
-    var beatsPerSecond: Double { tempo / 60.0 }
-    var secondsPerMeasure: Double { timeSignature.barLengthInBeats * secondsPerBeat }
-
-    func seconds(forBeat beat: Double) -> Double { beat * secondsPerBeat }
-    func beat(forSeconds seconds: Double) -> Double { seconds * beatsPerSecond }
-
-    func measureIndex(forBeat beat: Double) -> Int { timeSignature.measureIndex(forBeat: beat) }
-    func beatWithinMeasure(_ beat: Double) -> Double { timeSignature.beatWithinMeasure(forBeat: beat) }
-    func startBeat(ofMeasure index: Int) -> Double { timeSignature.startBeat(ofMeasure: index) }
-
-    /// Snaps a beat to the nearest subdivision of a quarter note.
-    func quantize(_ beat: Double, subdivisionsPerBeat: Int) -> Double {
-        guard subdivisionsPerBeat > 0 else { return beat }
-        let step = 1.0 / Double(subdivisionsPerBeat)
-        return (beat / step).rounded() * step
-    }
-
-    /// Beat positions where the metronome should click across `totalBeats`.
-    func clickBeats(totalBeats: Double, subdivision: MetronomeSubdivision) -> [Double] {
-        let step = 1.0 / Double(subdivision.clicksPerBeat)
-        guard step > 0, totalBeats > 0 else { return [] }
-        var beats: [Double] = []
-        var beat = 0.0
-        while beat < totalBeats - 1e-9 {
-            beats.append(beat)
-            beat += step
+    enum Tab: String, CaseIterable, Identifiable {
+        case search, library, player, settings
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .search: return "Search"
+            case .library: return "Library"
+            case .player: return "Player"
+            case .settings: return "Settings"
+            }
         }
-        return beats
+        var symbolName: String {
+            switch self {
+            case .search: return "magnifyingglass"
+            case .library: return "books.vertical"
+            case .player: return "music.note.list"
+            case .settings: return "gearshape"
+            }
+        }
     }
 
-    /// True when the click at `beat` falls on the downbeat of a measure.
-    func isDownbeat(_ beat: Double) -> Bool {
-        abs(beatWithinMeasure(beat)) < 1e-6
+    let registry: ProviderRegistry
+    let searchService: SearchService
+    let tabService: TabService
+    let libraryService: LibraryService
+    let downloadService: DownloadService
+    let playback: PlaybackEngine
+
+    var selectedTab: Tab = .search
+    var preferences: UserPreferences {
+        didSet { libraryService.update(preferences: preferences) }
     }
 
-    /// Length of the count-in in beats (spec §21: three beats before the song).
-    static let countInBeats: Int = 3
+    private(set) var openEntry: LibraryEntry?
+    private(set) var isLoadingTab = false
+    var loadError: String?
+    var resumePrompt: ResumePrompt?
 
-    func countInDuration(beats: Int = TempoEngine.countInBeats) -> Double {
-        Double(beats) * secondsPerBeat
+    struct ResumePrompt: Identifiable {
+        var id: String { entryId }
+        var entryId: String
+        var title: String
+        var snapshot: PracticeSnapshot
+        var timeLabel: String
+    }
+
+    init(context: ModelContext) {
+        let registry = ProviderRegistry.makeDefault()
+        self.registry = registry
+        self.searchService = SearchService(registry: registry)
+        let tabService = TabService(registry: registry)
+        self.tabService = tabService
+        let library = LibraryService(context: context)
+        self.libraryService = library
+        self.downloadService = DownloadService(tabService: tabService, library: library)
+        self.playback = PlaybackEngine()
+        self.preferences = library.preferences()
+
+        playback.onPlaybackFinished = { [weak self] in
+            self?.persistPracticeState()
+        }
+    }
+
+    // MARK: - Opening a tab
+
+    func open(result: TabSearchResult, autoplay: Bool = false) async {
+        isLoadingTab = true
+        loadError = nil
+
+        let entry = libraryService.addIfNeeded(result)
+        openEntry = entry
+
+        do {
+            let document = try await tabService.document(
+                for: result, offlineData: downloadService.offlineData(for: entry))
+            await playback.load(document: document, preferences: preferences)
+            libraryService.markPlayed(entry)
+            selectedTab = .player
+
+            if preferences.resumeFromLastPosition, entry.hasResumePoint {
+                let snapshot = entry.practiceSnapshot
+                // Same conversion the transport read-out uses, so the two agree at any speed.
+                var probe = PlaybackState()
+                probe.tempo = document.tempo
+                probe.speed = snapshot.speed
+                let seconds = probe.beatsToSeconds(snapshot.beat)
+                resumePrompt = ResumePrompt(entryId: entry.id,
+                                            title: document.title,
+                                            snapshot: snapshot,
+                                            timeLabel: seconds.clockString)
+            } else if autoplay {
+                playback.play()
+            }
+        } catch {
+            loadError = error.localizedDescription
+        }
+        isLoadingTab = false
+    }
+
+    func open(entry: LibraryEntry, autoplay: Bool = false) async {
+        await open(result: entry.searchResult, autoplay: autoplay)
+    }
+
+    func acceptResume() {
+        guard let prompt = resumePrompt else { return }
+        playback.restore(practice: prompt.snapshot)
+        resumePrompt = nil
+    }
+
+    func declineResume() {
+        resumePrompt = nil
+        playback.seek(toBeat: 0)
+    }
+
+    // MARK: - Practice state
+
+    func persistPracticeState() {
+        guard let entry = openEntry else { return }
+        libraryService.store(practice: playback.practiceSnapshot, for: entry)
+    }
+
+    /// Mirrors the player's current toggles back into the user's defaults.
+    func capturePlaybackDefaults() {
+        var updated = preferences
+        updated.metronomeEnabled = playback.state.metronomeEnabled
+        updated.metronomeVolume = playback.state.metronomeVolume
+        updated.metronomeSubdivision = playback.state.metronomeSubdivision
+        updated.countInEnabled = playback.state.countInEnabled
+        updated.backtrackEnabled = playback.state.backtrackEnabled
+        updated.autoScrollEnabled = playback.state.autoScrollEnabled
+        updated.chordDisplayEnabled = playback.state.chordDisplayEnabled
+        preferences = updated
     }
 }

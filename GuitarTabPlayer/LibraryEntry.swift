@@ -1,144 +1,88 @@
 import Foundation
-import Observation
 import SwiftData
 
-/// Composition root: builds the provider registry, the services and the playback engine,
-/// and holds whatever navigation state the whole app shares.
-@Observable
-@MainActor
-final class AppState {
+/// One saved tab, plus the practice state attached to it (spec §32, §35, §36).
+@Model
+final class LibraryEntry {
+    @Attribute(.unique) var id: String        // "<providerId>:<tabId>"
+    var tabId: String
+    var providerId: String
+    var providerName: String
+    var title: String
+    var artist: String
+    var album: String?
+    var tempo: Double
+    var difficultyRaw: String
+    var tuningName: String
+    var instrumentsRaw: [String]
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case search, library, player, settings
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .search: return "Search"
-            case .library: return "Library"
-            case .player: return "Player"
-            case .settings: return "Settings"
-            }
-        }
-        var symbolName: String {
-            switch self {
-            case .search: return "magnifyingglass"
-            case .library: return "books.vertical"
-            case .player: return "music.note.list"
-            case .settings: return "gearshape"
-            }
-        }
+    var isFavorite: Bool
+    var isDownloaded: Bool
+    var addedAt: Date
+    var lastPlayedAt: Date?
+    var playCount: Int
+
+    // Practice state
+    var lastBeat: Double
+    var lastSpeed: Double
+    var lastTranspose: Int
+    var mutedTrackIds: [String]
+
+    /// Normalised document cached for offline use, only when the licence permits it (spec §33).
+    @Attribute(.externalStorage) var cachedDocument: Data?
+
+    init(result: TabSearchResult) {
+        self.id = "\(result.providerId):\(result.id)"
+        self.tabId = result.id
+        self.providerId = result.providerId
+        self.providerName = result.providerName
+        self.title = result.title
+        self.artist = result.artist
+        self.album = result.album
+        self.tempo = result.tempo
+        self.difficultyRaw = result.difficulty.rawValue
+        self.tuningName = result.tuning
+        self.instrumentsRaw = result.instruments.map(\.rawValue)
+        self.isFavorite = false
+        self.isDownloaded = false
+        self.addedAt = .now
+        self.lastPlayedAt = nil
+        self.playCount = 0
+        self.lastBeat = 0
+        self.lastSpeed = 1.0
+        self.lastTranspose = 0
+        self.mutedTrackIds = []
+        self.cachedDocument = nil
     }
 
-    let registry: ProviderRegistry
-    let searchService: SearchService
-    let tabService: TabService
-    let libraryService: LibraryService
-    let downloadService: DownloadService
-    let playback: PlaybackEngine
+    var difficulty: Difficulty { Difficulty(rawValue: difficultyRaw) ?? .intermediate }
+    var instruments: [InstrumentType] { instrumentsRaw.compactMap(InstrumentType.init(rawValue:)) }
 
-    var selectedTab: Tab = .search
-    var preferences: UserPreferences {
-        didSet { libraryService.update(preferences: preferences) }
+    var practiceSnapshot: PracticeSnapshot {
+        PracticeSnapshot(beat: lastBeat, speed: lastSpeed, transpose: lastTranspose, mutedTrackIds: mutedTrackIds)
     }
 
-    private(set) var openEntry: LibraryEntry?
-    private(set) var isLoadingTab = false
-    var loadError: String?
-    var resumePrompt: ResumePrompt?
-
-    struct ResumePrompt: Identifiable {
-        var id: String { entryId }
-        var entryId: String
-        var title: String
-        var snapshot: PracticeSnapshot
-        var timeLabel: String
+    func apply(_ snapshot: PracticeSnapshot) {
+        lastBeat = snapshot.beat
+        lastSpeed = snapshot.speed
+        lastTranspose = snapshot.transpose
+        mutedTrackIds = snapshot.mutedTrackIds
     }
 
-    init(context: ModelContext) {
-        let registry = ProviderRegistry.makeDefault()
-        self.registry = registry
-        self.searchService = SearchService(registry: registry)
-        let tabService = TabService(registry: registry)
-        self.tabService = tabService
-        let library = LibraryService(context: context)
-        self.libraryService = library
-        self.downloadService = DownloadService(tabService: tabService, library: library)
-        self.playback = PlaybackEngine()
-        self.preferences = library.preferences()
+    var hasResumePoint: Bool { lastBeat > 1 }
 
-        playback.onPlaybackFinished = { [weak self] in
-            self?.persistPracticeState()
-        }
-    }
-
-    // MARK: - Opening a tab
-
-    func open(result: TabSearchResult, autoplay: Bool = false) async {
-        isLoadingTab = true
-        loadError = nil
-
-        let entry = libraryService.addIfNeeded(result)
-        openEntry = entry
-
-        do {
-            let document = try await tabService.document(
-                for: result, offlineData: downloadService.offlineData(for: entry))
-            await playback.load(document: document, preferences: preferences)
-            libraryService.markPlayed(entry)
-            selectedTab = .player
-
-            if preferences.resumeFromLastPosition, entry.hasResumePoint {
-                let snapshot = entry.practiceSnapshot
-                // Same conversion the transport read-out uses, so the two agree at any speed.
-                var probe = PlaybackState()
-                probe.tempo = document.tempo
-                probe.speed = snapshot.speed
-                let seconds = probe.beatsToSeconds(snapshot.beat)
-                resumePrompt = ResumePrompt(entryId: entry.id,
-                                            title: document.title,
-                                            snapshot: snapshot,
-                                            timeLabel: seconds.clockString)
-            } else if autoplay {
-                playback.play()
-            }
-        } catch {
-            loadError = error.localizedDescription
-        }
-        isLoadingTab = false
-    }
-
-    func open(entry: LibraryEntry, autoplay: Bool = false) async {
-        await open(result: entry.searchResult, autoplay: autoplay)
-    }
-
-    func acceptResume() {
-        guard let prompt = resumePrompt else { return }
-        playback.restore(practice: prompt.snapshot)
-        resumePrompt = nil
-    }
-
-    func declineResume() {
-        resumePrompt = nil
-        playback.seek(toBeat: 0)
-    }
-
-    // MARK: - Practice state
-
-    func persistPracticeState() {
-        guard let entry = openEntry else { return }
-        libraryService.store(practice: playback.practiceSnapshot, for: entry)
-    }
-
-    /// Mirrors the player's current toggles back into the user's defaults.
-    func capturePlaybackDefaults() {
-        var updated = preferences
-        updated.metronomeEnabled = playback.state.metronomeEnabled
-        updated.metronomeVolume = playback.state.metronomeVolume
-        updated.metronomeSubdivision = playback.state.metronomeSubdivision
-        updated.countInEnabled = playback.state.countInEnabled
-        updated.backtrackEnabled = playback.state.backtrackEnabled
-        updated.autoScrollEnabled = playback.state.autoScrollEnabled
-        updated.chordDisplayEnabled = playback.state.chordDisplayEnabled
-        preferences = updated
+    var searchResult: TabSearchResult {
+        TabSearchResult(id: tabId,
+                        providerId: providerId,
+                        providerName: providerName,
+                        title: title,
+                        artist: artist,
+                        album: album,
+                        difficulty: difficulty,
+                        tuning: tuningName,
+                        instruments: instruments,
+                        tempo: tempo,
+                        rating: 0,
+                        capabilities: isDownloaded ? .full : .tabOnly)
     }
 }

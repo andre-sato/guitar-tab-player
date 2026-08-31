@@ -1,128 +1,103 @@
 import Foundation
-import SwiftData
 
-/// Everything that touches the SwiftData store: library, favourites, history, preferences,
-/// and the per-song practice state (spec §32, §35, §36).
-@MainActor
-final class LibraryService {
+/// Catalogue-level metadata, kept separate from tab content so licensing can differ (spec §44).
+struct Song: Codable, Hashable, Sendable, Identifiable {
+    var id: String
+    var title: String
+    var artist: String
+    var album: String?
+    var duration: TimeInterval
+    var tempo: Double
+    var key: MusicalKey
+    var providerId: String
 
-    enum Filter: String, CaseIterable, Identifiable {
-        case all, recentlyPlayed, favorites, downloaded, practice
-
-        var id: String { rawValue }
-        var displayName: String {
-            switch self {
-            case .all: return "My Library"
-            case .recentlyPlayed: return "Recently Played"
-            case .favorites: return "Favorites"
-            case .downloaded: return "Downloaded"
-            case .practice: return "Practice"
-            }
-        }
-        var symbolName: String {
-            switch self {
-            case .all: return "music.note.list"
-            case .recentlyPlayed: return "clock"
-            case .favorites: return "heart"
-            case .downloaded: return "arrow.down.circle"
-            case .practice: return "metronome"
-            }
-        }
+    init(id: String,
+         title: String,
+         artist: String,
+         album: String? = nil,
+         duration: TimeInterval,
+         tempo: Double,
+         key: MusicalKey,
+         providerId: String) {
+        self.id = id
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+        self.tempo = tempo
+        self.key = key
+        self.providerId = providerId
     }
 
-    private let context: ModelContext
+    init(document: TabDocument) {
+        self.init(id: document.id,
+                  title: document.title,
+                  artist: document.artist,
+                  album: document.album,
+                  duration: document.duration,
+                  tempo: document.tempo,
+                  key: document.key,
+                  providerId: document.providerId)
+    }
+}
 
-    init(context: ModelContext) {
-        self.context = context
+/// One row in a search result list. Deliberately light: no events, no audio.
+struct TabSearchResult: Codable, Hashable, Sendable, Identifiable {
+    var id: String
+    var providerId: String
+    var providerName: String
+    var title: String
+    var artist: String
+    var album: String?
+    var difficulty: Difficulty
+    var tuning: String
+    var instruments: [InstrumentType]
+    var tempo: Double
+    var rating: Double
+    var capabilities: ContentCapabilities
+
+    var subtitle: String {
+        [artist, album].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+struct SearchFilters: Hashable, Sendable {
+    var instrument: InstrumentType?
+    var difficulty: Difficulty?
+    var tuning: String?
+    var providerIds: Set<String>
+    var artist: String?
+    var album: String?
+
+    init(instrument: InstrumentType? = nil,
+         difficulty: Difficulty? = nil,
+         tuning: String? = nil,
+         providerIds: Set<String> = [],
+         artist: String? = nil,
+         album: String? = nil) {
+        self.instrument = instrument
+        self.difficulty = difficulty
+        self.tuning = tuning
+        self.providerIds = providerIds
+        self.artist = artist
+        self.album = album
     }
 
-    // MARK: - Entries
+    static let none = SearchFilters()
 
-    func entry(providerId: String, tabId: String) -> LibraryEntry? {
-        let key = "\(providerId):\(tabId)"
-        var descriptor = FetchDescriptor<LibraryEntry>(predicate: #Predicate { $0.id == key })
-        descriptor.fetchLimit = 1
-        return (try? context.fetch(descriptor))?.first
+    var isEmpty: Bool {
+        instrument == nil && difficulty == nil && tuning == nil
+            && providerIds.isEmpty && artist == nil && album == nil
     }
 
-    @discardableResult
-    func addIfNeeded(_ result: TabSearchResult) -> LibraryEntry {
-        if let existing = entry(providerId: result.providerId, tabId: result.id) { return existing }
-        let entry = LibraryEntry(result: result)
-        context.insert(entry)
-        save()
-        return entry
-    }
-
-    func entries(filter: Filter) -> [LibraryEntry] {
-        let descriptor: FetchDescriptor<LibraryEntry>
-        switch filter {
-        case .all:
-            descriptor = FetchDescriptor(sortBy: [SortDescriptor(\.addedAt, order: .reverse)])
-        case .recentlyPlayed:
-            descriptor = FetchDescriptor(predicate: #Predicate { $0.lastPlayedAt != nil },
-                                         sortBy: [SortDescriptor(\.lastPlayedAt, order: .reverse)])
-        case .favorites:
-            descriptor = FetchDescriptor(predicate: #Predicate { $0.isFavorite },
-                                         sortBy: [SortDescriptor(\.title)])
-        case .downloaded:
-            descriptor = FetchDescriptor(predicate: #Predicate { $0.isDownloaded },
-                                         sortBy: [SortDescriptor(\.title)])
-        case .practice:
-            descriptor = FetchDescriptor(predicate: #Predicate { $0.lastBeat > 1 },
-                                         sortBy: [SortDescriptor(\.lastPlayedAt, order: .reverse)])
-        }
-        return (try? context.fetch(descriptor)) ?? []
-    }
-
-    func toggleFavorite(_ entry: LibraryEntry) {
-        entry.isFavorite.toggle()
-        save()
-    }
-
-    func remove(_ entry: LibraryEntry) {
-        context.delete(entry)
-        save()
-    }
-
-    func markPlayed(_ entry: LibraryEntry) {
-        entry.lastPlayedAt = .now
-        entry.playCount += 1
-        save()
-    }
-
-    func store(practice: PracticeSnapshot, for entry: LibraryEntry) {
-        entry.apply(practice)
-        save()
-    }
-
-    // MARK: - Preferences
-
-    func preferences() -> UserPreferences {
-        record().value
-    }
-
-    func update(preferences: UserPreferences) {
-        let record = record()
-        record.value = preferences
-        save()
-    }
-
-    private func record() -> UserPreferencesRecord {
-        var descriptor = FetchDescriptor<UserPreferencesRecord>(predicate: #Predicate { $0.key == "default" })
-        descriptor.fetchLimit = 1
-        if let existing = (try? context.fetch(descriptor))?.first { return existing }
-        let created = UserPreferencesRecord()
-        context.insert(created)
-        save()
-        return created
-    }
-
-    // MARK: - Saving
-
-    func save() {
-        guard context.hasChanges else { return }
-        do { try context.save() }
-        catch { NSLog("GuitarTabPlayer: could not save library - \(error.localizedDescription)") }
+    var activeCount: Int {
+        var count = 0
+        if instrument != nil { count += 1 }
+        if difficulty != nil { count += 1 }
+        if tuning != nil { count += 1 }
+        if !providerIds.isEmpty { count += 1 }
+        if artist != nil { count += 1 }
+        if album != nil { count += 1 }
+        return count
     }
 }

@@ -1,113 +1,50 @@
-import SwiftUI
+# Guitar Tab Player
 
-/// Per-track mute, solo, volume and pan (spec §15–§17).
-struct TrackMixerView: View {
-    @Environment(PlaybackEngine.self) private var playback
+Toque junto com suas músicas favoritas: um player de tablaturas que canta cada nota, acorde, bend e slide de verdade, deixa você mutar/solar faixas, ajustar velocidade e afinação, e gravar seu próprio play-along.
 
-    var showsVolumeSliders: Bool = true
+## Para que serve
 
-    private var state: PlaybackState { playback.state }
+O Guitar Tab Player não é só um leitor de tablatura em texto — ele **executa** a tab. Cada música é um documento estruturado (compasso, andamento, afinação, capotraste) com uma ou mais faixas de instrumento (guitarra base, guitarra solo, violão, baixo, bateria), e o motor de playback sintetiza notas, acordes, bends, slides, hammer-ons/pull-offs, vibrato, palm mute, ghost notes, harmônicos e taps em sincronia com uma tablatura que rola sozinha na tela. A ideia é praticar: ouvir a parte certa, isolar um instrumento, desacelerar uma passagem difícil, transpor pro seu tom e tocar junto — inclusive gravando a sua performance.
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Tracks")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if state.hasSoloedTrack {
-                    Button("Clear solo") { playback.clearSolos() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                }
-            }
+## Funcionalidades
 
-            ForEach(state.tracks) { track in
-                TrackRow(track: track,
-                         isSelected: playback.selectedTrackId == track.id,
-                         isAudible: state.isAudible(track),
-                         showsVolume: showsVolumeSliders)
-            }
-        }
-    }
-}
+- **Busca e catálogo** — pesquise tabs em vários provedores/catálogos ao mesmo tempo (com filtros por afinação, instrumento e dificuldade), e navegue pelo catálogo local de demonstração.
+- **Biblioteca pessoal** — favorite músicas, baixe tabs para tocar offline (quando a licença permite) e acompanhe quantas vezes já tocou cada uma.
+- **Retomar de onde parou** — posição no compasso, velocidade, transposição e quais faixas estavam mudas são salvos automaticamente por música.
+- **Mixer por faixa** — mute, solo, volume e pan independentes para cada instrumento da música (`TrackMixerView`).
+- **Transporte completo** — play/pause, scrubber, presets de velocidade e mudança de tom, com contagem regressiva (count-in) opcional antes de tocar.
+- **Metrônomo configurável** — subdivisão (semínima, colcheia, etc.) e volume ajustáveis, mais uma faixa de "backtrack" (base de acompanhamento) opcional.
+- **Transposição inteligente** — transpõe acordes e notas na tablatura respeitando a afinação e o capotraste do instrumento, realocando automaticamente para a posição mais tocável no braço quando necessário.
+- **Afinações suportadas** — Standard, Drop D, Eb Standard, D Standard, Drop C, Open G, Open D, Bass Standard e Bass Drop D.
+- **Tablatura interativa** — acompanha o áudio com auto-scroll, mostra os diagramas de acorde acima da tab e permite tocar em qualquer ponto para pular direto pra lá.
+- **Gravação** — grave a si mesmo tocando junto com a música.
+- **Atalhos de teclado** — suporte a teclado físico no iPad.
+- **Ajustes por padrão** — defina no app quais recursos (metrônomo, count-in, backtrack, auto-scroll, exibição de acordes, retomar posição, velocidade padrão) já vêm ligados em toda música nova.
 
-private struct TrackRow: View {
-    @Environment(PlaybackEngine.self) private var playback
+## Como usar
 
-    let track: TrackPlaybackState
-    let isSelected: Bool
-    let isAudible: Bool
-    let showsVolume: Bool
+### Como usuário
 
-    var body: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 10) {
-                Button {
-                    playback.selectTrack(track.id)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: track.instrument.symbolName)
-                            .frame(width: 22)
-                            .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                        Text(track.name)
-                            .font(.subheadline)
-                            .fontWeight(isSelected ? .semibold : .regular)
-                            .foregroundStyle(isAudible ? .primary : .secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Shows this track's tablature")
+1. Abra o app e use a aba **Search** para procurar uma música (ou navegue pelo catálogo local de demonstração).
+2. Adicione a música à sua **Library** — ela fica salva com suas favoritas e progresso.
+3. Abra a música na aba **Player**: toque, ajuste velocidade e tom, ligue o metrônomo/count-in e use o mixer para mutar ou solar faixas.
+4. Siga a tablatura, que rola sozinha no ritmo da música, ou toque em qualquer trecho para pular pra lá.
+5. Configure seus padrões preferidos na aba **Settings** — eles valem para toda música nova.
 
-                Button {
-                    playback.toggleSolo(trackId: track.id)
-                } label: {
-                    Text("S")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 26, height: 26)
-                        .background(track.isSolo ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary),
-                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .foregroundStyle(track.isSolo ? Color.white : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(track.name) solo")
-                .accessibilityValue(track.isSolo ? "on" : "off")
+### Como desenvolvedor
 
-                Button {
-                    playback.toggleMute(trackId: track.id)
-                } label: {
-                    Image(systemName: track.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.caption)
-                        .frame(width: 26, height: 26)
-                        .background(track.isMuted ? AnyShapeStyle(Color.red.opacity(0.85)) : AnyShapeStyle(.quaternary),
-                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .foregroundStyle(track.isMuted ? Color.white : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(track.name) mute")
-                .accessibilityValue(track.isMuted ? "muted" : "audible")
-            }
+- O app nativo é um projeto Xcode (`GuitarTabPlayer.xcodeproj`), escrito em SwiftUI + SwiftData. Abra o projeto no Xcode, escolha um simulador/dispositivo iOS 17+ e rode.
+- Também existe uma versão para navegador em [web/](web/) e um instalador para Windows em [windows/](windows/).
+- Os scripts em [scripts/](scripts/) geram os dados de tab (`build_songs_json.py`, `make_tabs.py`) e os builds (`build.sh`, `build_web.py`).
 
-            if showsVolume {
-                HStack(spacing: 8) {
-                    Image(systemName: "speaker.fill").font(.caption2).foregroundStyle(.tertiary)
-                    Slider(value: Binding(
-                        get: { Double(track.volume) },
-                        set: { playback.setVolume(Float($0), trackId: track.id) }
-                    ), in: 0...1)
-                    .disabled(track.isMuted)
-                    Text("\(Int(track.volume * 100))%")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 38, alignment: .trailing)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(track.name) volume")
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(isAudible ? 1 : 0.55)
-    }
-}
+## Plataformas e versões de SO
+
+| Plataforma           | Como roda                                                | Requisito mínimo           |
+| -------------------- | --------------------------------------------------------- | --------------------------- |
+| iOS (iPhone e iPad)  | App nativo SwiftUI, via Xcode/App Store                  | iOS 17.0+                   |
+| Navegador            | Versão web servida a partir de [web/](web/)               | Qualquer navegador moderno  |
+| Windows              | Instalador em [windows/](windows/) (`Install.ps1` / `Instalar.cmd`) | Windows 10 ou superior |
+
+## Licença
+
+Distribuído sob a licença MIT — veja [LICENSE](LICENSE).

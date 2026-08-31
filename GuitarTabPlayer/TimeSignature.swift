@@ -1,62 +1,36 @@
 import Foundation
 
-/// Stores a normalised tab for offline use, but only when the licence allows it (spec §33, §44).
-@MainActor
-final class DownloadService {
+struct TimeSignature: Codable, Hashable, Sendable {
+    var beatsPerBar: Int
+    var beatUnit: Int
 
-    enum DownloadState: Equatable {
-        case notDownloaded
-        case downloading
-        case downloaded
-        case notPermitted
-        case failed(String)
+    static let fourFour = TimeSignature(beatsPerBar: 4, beatUnit: 4)
+    static let threeFour = TimeSignature(beatsPerBar: 3, beatUnit: 4)
+    static let sixEight = TimeSignature(beatsPerBar: 6, beatUnit: 8)
+
+    var displayName: String { "\(beatsPerBar)/\(beatUnit)" }
+
+    /// Length of one bar expressed in quarter-note beats (the unit used throughout the app).
+    var barLengthInBeats: Double { Double(beatsPerBar) * (4.0 / Double(beatUnit)) }
+
+    func measureIndex(forBeat beat: Double) -> Int {
+        guard barLengthInBeats > 0 else { return 0 }
+        return Int(floor(beat / barLengthInBeats))
     }
 
-    private let tabService: TabService
-    private let library: LibraryService
-    private(set) var states: [String: DownloadState] = [:]
-
-    init(tabService: TabService, library: LibraryService) {
-        self.tabService = tabService
-        self.library = library
+    func beatWithinMeasure(forBeat beat: Double) -> Double {
+        guard barLengthInBeats > 0 else { return beat }
+        return beat.truncatingRemainder(dividingBy: barLengthInBeats)
     }
 
-    func state(for entry: LibraryEntry) -> DownloadState {
-        states[entry.id] ?? (entry.isDownloaded ? .downloaded : .notDownloaded)
-    }
+    func startBeat(ofMeasure index: Int) -> Double { Double(index) * barLengthInBeats }
+}
 
-    @discardableResult
-    func download(entry: LibraryEntry) async -> DownloadState {
-        states[entry.id] = .downloading
-        do {
-            let document = try await tabService.document(providerId: entry.providerId, tabId: entry.tabId)
-            guard document.capabilities.canDownload else {
-                states[entry.id] = .notPermitted
-                return .notPermitted
-            }
-            entry.cachedDocument = try JSONEncoder().encode(document)
-            entry.isDownloaded = true
-            library.save()
-            states[entry.id] = .downloaded
-            return .downloaded
-        } catch {
-            let state = DownloadState.failed(error.localizedDescription)
-            states[entry.id] = state
-            return state
-        }
-    }
+struct SongSection: Codable, Hashable, Sendable, Identifiable {
+    var id: String
+    var name: String
+    var startBeat: Double
+    var lengthBeats: Double
 
-    func removeDownload(entry: LibraryEntry) {
-        entry.cachedDocument = nil
-        entry.isDownloaded = false
-        library.save()
-        states[entry.id] = .notDownloaded
-        tabService.evict(providerId: entry.providerId, tabId: entry.tabId)
-    }
-
-    /// Offline payload for an entry, if one was stored.
-    func offlineData(for entry: LibraryEntry?) -> Data? {
-        guard let entry, entry.isDownloaded else { return nil }
-        return entry.cachedDocument
-    }
+    var endBeat: Double { startBeat + lengthBeats }
 }
