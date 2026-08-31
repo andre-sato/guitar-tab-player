@@ -1,0 +1,157 @@
+import SwiftUI
+import SwiftData
+import UniformTypeIdentifiers
+
+struct LibraryView: View {
+    @Environment(AppState.self) private var appState
+    @State private var filter: LibraryService.Filter = .all
+    @State private var showImporter = false
+    @State private var importMessage: String?
+    /// Bumped after mutations so the list re-reads the store.
+    @State private var revision = 0
+
+    private var entries: [LibraryEntry] {
+        _ = revision
+        return appState.libraryService.entries(filter: filter)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("Collection", selection: $filter) {
+                    ForEach(LibraryService.Filter.allCases) { value in
+                        Text(value.displayName).tag(value)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
+                if entries.isEmpty {
+                    ContentUnavailableView(
+                        filter.displayName,
+                        systemImage: filter.symbolName,
+                        description: Text("Tabs you open, favourite or download show up here."))
+                } else {
+                    List {
+                        ForEach(entries) { entry in
+                            LibraryRow(entry: entry)
+                                .contentShape(Rectangle())
+                                .onTapGesture { Task { await appState.open(entry: entry) } }
+                                .swipeActions(edge: .leading) {
+                                    Button {
+                                        appState.libraryService.toggleFavorite(entry)
+                                        revision += 1
+                                    } label: {
+                                        Label(entry.isFavorite ? "Unfavorite" : "Favorite",
+                                              systemImage: entry.isFavorite ? "heart.slash" : "heart")
+                                    }
+                                    .tint(.pink)
+                                }
+                                .swipeActions(edge: .trailing) {
+                                    Button(role: .destructive) {
+                                        appState.libraryService.remove(entry)
+                                        revision += 1
+                                    } label: { Label("Remove", systemImage: "trash") }
+
+                                    Button {
+                                        Task {
+                                            await appState.downloadService.download(entry: entry)
+                                            revision += 1
+                                        }
+                                    } label: {
+                                        Label(entry.isDownloaded ? "Downloaded" : "Download",
+                                              systemImage: "arrow.down.circle")
+                                    }
+                                    .tint(.blue)
+                                }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Library")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showImporter = true } label: {
+                        Label("Import tab", systemImage: "square.and.arrow.down")
+                    }
+                }
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
+                handleImport(result)
+            }
+            .alert("Import", isPresented: .constant(importMessage != nil)) {
+                Button("OK") { importMessage = nil }
+            } message: {
+                Text(importMessage ?? "")
+            }
+        }
+    }
+
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            Task {
+                guard let provider = appState.registry.provider(withId: "local") as? LocalFileProvider else {
+                    importMessage = "The local library is unavailable."
+                    return
+                }
+                do {
+                    let document = try await provider.importTab(from: url)
+                    importMessage = "Imported “\(document.title)”."
+                    revision += 1
+                } catch {
+                    importMessage = error.localizedDescription
+                }
+            }
+        case .failure(let error):
+            importMessage = error.localizedDescription
+        }
+    }
+}
+
+struct LibraryRow: View {
+    let entry: LibraryEntry
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.tint.opacity(0.15))
+                Image(systemName: "guitars")
+                    .foregroundStyle(.tint)
+            }
+            .frame(width: 44, height: 44)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.title).font(.headline)
+                Text(entry.artist).font(.subheadline).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text("\(Int(entry.tempo)) BPM")
+                    Text(entry.tuningName)
+                    if entry.hasResumePoint {
+                        Label((entry.lastBeat * 60 / max(1, entry.tempo)).clockString, systemImage: "clock.arrow.circlepath")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            VStack(spacing: 6) {
+                if entry.isFavorite { Image(systemName: "heart.fill").foregroundStyle(.pink) }
+                if entry.isDownloaded { Image(systemName: "arrow.down.circle.fill").foregroundStyle(.blue) }
+            }
+            .imageScale(.small)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+#Preview {
+    PreviewFactory.wrap { LibraryView() }
+}

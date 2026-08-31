@@ -1,0 +1,216 @@
+import SwiftUI
+
+struct SearchView: View {
+    @Environment(AppState.self) private var appState
+    @State private var model: SearchViewModel?
+    @State private var showFilters = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let model {
+                    content(model: model)
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle("Search")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showFilters = true
+                    } label: {
+                        Label("Filters", systemImage: filterSymbol)
+                    }
+                    .accessibilityLabel("Search filters")
+                }
+            }
+            .sheet(isPresented: $showFilters) {
+                if let model {
+                    SearchFiltersSheet(model: model)
+                        .presentationDetents([.medium, .large])
+                }
+            }
+        }
+        .task {
+            if model == nil { model = SearchViewModel(service: appState.searchService) }
+            await model?.onAppear()
+        }
+    }
+
+    private var filterSymbol: String {
+        (model?.filters.isEmpty ?? true)
+            ? "line.3.horizontal.decrease.circle"
+            : "line.3.horizontal.decrease.circle.fill"
+    }
+
+    @ViewBuilder
+    private func content(model: SearchViewModel) -> some View {
+        @Bindable var model = model
+
+        List {
+            if !model.failures.isEmpty {
+                Section {
+                    ForEach(model.failures) { failure in
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(failure.providerName).font(.subheadline.weight(.semibold))
+                                Text(failure.message).font(.caption).foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+
+            if model.results.isEmpty && !model.isSearching {
+                Section {
+                    ContentUnavailableView(
+                        "No tabs found",
+                        systemImage: "magnifyingglass",
+                        description: Text("Try another song, artist or album — or relax the filters."))
+                    .listRowBackground(Color.clear)
+                }
+            } else {
+                Section {
+                    ForEach(model.results) { result in
+                        Button {
+                            Task { await appState.open(result: result) }
+                        } label: {
+                            SearchResultRow(result: result)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    if !model.results.isEmpty {
+                        Text("\(model.results.count) result\(model.results.count == 1 ? "" : "s")")
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .searchable(text: $model.query, prompt: "Enter song, artist or album")
+        .onChange(of: model.query) { _, _ in model.queryChanged() }
+        .overlay {
+            if model.isSearching && model.results.isEmpty { ProgressView() }
+        }
+    }
+}
+
+struct SearchResultRow: View {
+    let result: TabSearchResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(result.title)
+                .font(.headline)
+            Text(result.subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                StarRating(rating: result.rating)
+                Text(result.difficulty.displayName)
+                Text("·")
+                Text(result.tuning)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 6) {
+                ForEach(Array(Set(result.instruments)).sorted(by: { $0.rawValue < $1.rawValue })) { instrument in
+                    Image(systemName: instrument.symbolName)
+                        .imageScale(.small)
+                        .foregroundStyle(.tint)
+                        .accessibilityLabel(instrument.displayName)
+                }
+                Spacer()
+                Text(result.providerName)
+                    .font(.caption2)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct StarRating: View {
+    let rating: Double
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(0..<5, id: \.self) { index in
+                Image(systemName: Double(index) + 0.5 < rating ? "star.fill" : "star")
+            }
+        }
+        .foregroundStyle(.yellow)
+        .accessibilityLabel(String(format: "Rated %.1f out of 5", rating))
+    }
+}
+
+struct SearchFiltersSheet: View {
+    @Bindable var model: SearchViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Instrument") {
+                    Picker("Instrument", selection: $model.filters.instrument) {
+                        Text("Any").tag(InstrumentType?.none)
+                        ForEach(InstrumentType.allCases) { instrument in
+                            Text(instrument.displayName).tag(InstrumentType?.some(instrument))
+                        }
+                    }
+                }
+                Section("Difficulty") {
+                    Picker("Difficulty", selection: $model.filters.difficulty) {
+                        Text("Any").tag(Difficulty?.none)
+                        ForEach(Difficulty.allCases) { difficulty in
+                            Text(difficulty.displayName).tag(Difficulty?.some(difficulty))
+                        }
+                    }
+                }
+                Section("Tuning") {
+                    Picker("Tuning", selection: $model.filters.tuning) {
+                        Text("Any").tag(String?.none)
+                        ForEach(model.availableTunings, id: \.self) { tuning in
+                            Text(tuning).tag(String?.some(tuning))
+                        }
+                    }
+                }
+                Section("Providers") {
+                    ForEach(model.availableProviders, id: \.id) { provider in
+                        Toggle(provider.name, isOn: Binding(
+                            get: { model.filters.providerIds.isEmpty || model.filters.providerIds.contains(provider.id) },
+                            set: { isOn in
+                                var ids = model.filters.providerIds
+                                if ids.isEmpty { ids = Set(model.availableProviders.map(\.id)) }
+                                if isOn { ids.insert(provider.id) } else { ids.remove(provider.id) }
+                                model.filters.providerIds = ids.count == model.availableProviders.count ? [] : ids
+                            }))
+                    }
+                }
+            }
+            .navigationTitle("Filters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Reset") { model.clearFilters() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { model.filtersChanged(); dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+}
+
+#Preview {
+    PreviewFactory.wrap { SearchView() }
+}

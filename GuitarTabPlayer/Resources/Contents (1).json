@@ -1,0 +1,93 @@
+import SwiftUI
+import SwiftData
+
+/// Shared wiring for Xcode previews: an in-memory store and a small sample song.
+@MainActor
+enum PreviewFactory {
+
+    static let container: ModelContainer = SwiftDataContainer.makeInMemory()
+
+    static func makeAppState() -> AppState {
+        AppState(context: container.mainContext)
+    }
+
+    static func wrap<Content: View>(@ViewBuilder _ content: @escaping () -> Content) -> some View {
+        PreviewHost(content: content)
+    }
+
+    static func root() -> some View {
+        wrap { RootView() }
+    }
+
+    /// A four-bar sample used when a preview needs a loaded document.
+    static func sampleDocument() -> TabDocument {
+        let tuning = Tuning.standard
+        var leadEvents: [TabEvent] = []
+        let melody: [(Double, Int, Int)] = [
+            (0, 3, 5), (0.5, 3, 7), (1, 4, 5), (1.5, 4, 7),
+            (2, 5, 5), (2.5, 5, 7), (3, 5, 8), (3.5, 5, 7)
+        ]
+        for (beat, string, fret) in melody {
+            leadEvents.append(.note(NoteEvent(startBeat: beat, durationBeats: 0.5, string: string, fret: fret)))
+        }
+
+        var rhythmEvents: [TabEvent] = []
+        for bar in 0..<2 {
+            let base = Double(bar) * 4
+            for offset in stride(from: 0.0, to: 4.0, by: 1.0) {
+                let shape = [0, 2, 2, 1, 0].enumerated().map { index, fret in
+                    NoteEvent(startBeat: base + offset, durationBeats: 1, string: index, fret: fret)
+                }
+                rhythmEvents.append(.chord(ChordEvent(startBeat: base + offset, durationBeats: 1, notes: shape)))
+            }
+        }
+
+        var drumEvents: [TabEvent] = []
+        for bar in 0..<2 {
+            let base = Double(bar) * 4
+            for eighth in stride(from: 0.0, to: 4.0, by: 0.5) {
+                drumEvents.append(.drum(DrumEvent(startBeat: base + eighth, durationBeats: 0.5, piece: .hiHatClosed, velocity: 0.6)))
+            }
+            drumEvents.append(.drum(DrumEvent(startBeat: base, durationBeats: 1, piece: .kick)))
+            drumEvents.append(.drum(DrumEvent(startBeat: base + 2, durationBeats: 1, piece: .snare)))
+        }
+
+        return TabDocument(
+            id: "preview.sample",
+            providerId: "local",
+            title: "Preview Riff",
+            artist: "Guitar Tab Player",
+            album: "Previews",
+            tempo: 100,
+            key: MusicalKey(root: 9, mode: .minor),
+            difficulty: .beginner,
+            tracks: [
+                TabTrack(id: "lead", name: "Lead Guitar", instrument: .leadGuitar, tuning: tuning, events: leadEvents),
+                TabTrack(id: "rhythm", name: "Rhythm Guitar", instrument: .rhythmGuitar, tuning: tuning, events: rhythmEvents),
+                TabTrack(id: "drums", name: "Drums", instrument: .drums, events: drumEvents)
+            ],
+            sections: [SongSection(id: "intro", name: "Intro", startBeat: 0, lengthBeats: 8)],
+            chords: [
+                Chord(id: "c1", startBeat: 0, durationBeats: 4, root: 9, quality: .minor),
+                Chord(id: "c2", startBeat: 4, durationBeats: 4, root: 5, quality: .major)
+            ],
+            capabilities: .tabOnly)
+    }
+}
+
+private struct PreviewHost<Content: View>: View {
+    let content: () -> Content
+    @State private var appState = PreviewFactory.makeAppState()
+
+    var body: some View {
+        content()
+            .environment(appState)
+            .environment(appState.playback)
+            .modelContainer(PreviewFactory.container)
+            .task {
+                if appState.playback.document == nil {
+                    await appState.playback.load(document: PreviewFactory.sampleDocument())
+                }
+            }
+    }
+}
